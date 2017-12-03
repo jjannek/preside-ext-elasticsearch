@@ -23,14 +23,15 @@ component extends="testbox.system.BaseSpec" {
 				};
 
 				mockConfigReader.$( "listIndexes", indexes.keyArray().sort( "textnocase" ) );
-				mockApiWrapper.$( "addAlias", {} );
 
 				for( var ix in indexes ){
 					mockApiWrapper.$( "getAliasIndexes" ).$args( ix ).$results( indexes[ ix ] );
 				}
 
+				engine.$( "_createAlias", {} );
 				engine.$( "createIndex", CreateUUId() );
 				engine.$( "rebuildIndex", true );
+				engine.$( "cleanupOldIndexes" );
 
 				engine.ensureIndexesExist();
 
@@ -58,19 +59,20 @@ component extends="testbox.system.BaseSpec" {
 				for( var ix in indexes ){
 					mockApiWrapper.$( "getAliasIndexes" ).$args( ix ).$results( indexes[ ix ] );
 				}
-				mockApiWrapper.$( "addAlias", {} );
 
 				uniqueIndexes = [ "ux1", "ux2", "ux3", "ux4" ];
 				engine.$( "createIndex" ).$results( uniqueIndexes[1], uniqueIndexes[2], uniqueIndexes[3], uniqueIndexes[4] );
 				engine.$( "rebuildIndex", true );
+				engine.$( "_createAlias", {} );
+				engine.$( "cleanupOldIndexes" );
 
 				engine.ensureIndexesExist();
 
-				expect( mockApiWrapper.$callLog().addAlias.len() ).toBe( 4 );
-				expect( mockApiWrapper.$callLog().addAlias[1] ).toBe( { index=uniqueIndexes[1], alias="ix_1" } );
-				expect( mockApiWrapper.$callLog().addAlias[2] ).toBe( { index=uniqueIndexes[2], alias="ix_3" } );
-				expect( mockApiWrapper.$callLog().addAlias[3] ).toBe( { index=uniqueIndexes[3], alias="ix_4" } );
-				expect( mockApiWrapper.$callLog().addAlias[4] ).toBe( { index=uniqueIndexes[4], alias="ix_6" } );
+				expect( engine.$callLog()._createAlias.len() ).toBe( 4 );
+				expect( engine.$callLog()._createAlias[1] ).toBe( { index=uniqueIndexes[1], alias="ix_1" } );
+				expect( engine.$callLog()._createAlias[2] ).toBe( { index=uniqueIndexes[2], alias="ix_3" } );
+				expect( engine.$callLog()._createAlias[3] ).toBe( { index=uniqueIndexes[3], alias="ix_4" } );
+				expect( engine.$callLog()._createAlias[4] ).toBe( { index=uniqueIndexes[4], alias="ix_6" } );
 			} );
 		} );
 
@@ -117,6 +119,7 @@ component extends="testbox.system.BaseSpec" {
 				mockApiWrapper.$( "addAlias", {} );
 				mockApiWrapper.$( "deleteIndex", {} );
 				engine.$( "isIndexReindexing", false );
+				engine.$( "_objectIsUsingSiteTenancy", false );
 				engine.$( "setIndexingStatus" );
 				engine.$( "createIndex" ).$args( indexName ).$results( uniqueIndexName );
 				mockConfigReader.$( "listObjectsForIndex", [] );
@@ -138,6 +141,8 @@ component extends="testbox.system.BaseSpec" {
 				mockApiWrapper.$( "addAlias", {} );
 				mockApiWrapper.$( "deleteIndex", {} );
 				engine.$( "isIndexReindexing", false );
+				engine.$( "_objectIsUsingSiteTenancy", false );
+				engine.$( "_isPageType", false );
 				engine.$( "setIndexingStatus" );
 				engine.$( "createIndex" ).$args( indexName ).$results( uniqueIndexName );
 				mockConfigReader.$( "listObjectsForIndex" ).$args( indexName ).$results( objects );
@@ -163,6 +168,8 @@ component extends="testbox.system.BaseSpec" {
 				mockApiWrapper.$( "addAlias", {} );
 				mockApiWrapper.$( "deleteIndex", {} );
 				engine.$( "isIndexReindexing", false );
+				engine.$( "_objectIsUsingSiteTenancy", false );
+				engine.$( "_isPageType", false );
 				engine.$( "setIndexingStatus" );
 				engine.$( "createIndex" ).$args( indexName ).$results( uniqueIndexName );
 				mockConfigReader.$( "listObjectsForIndex", [ "someobject "] );
@@ -183,6 +190,8 @@ component extends="testbox.system.BaseSpec" {
 				mockApiWrapper.$( "addAlias", {} );
 				mockApiWrapper.$( "deleteIndex", {} );
 				engine.$( "isIndexReindexing", false );
+				engine.$( "_objectIsUsingSiteTenancy", false );
+				engine.$( "_isPageType", false );
 				engine.$( "setIndexingStatus" );
 				engine.$( "createIndex" ).$args( indexName ).$results( uniqueIndexName );
 				mockConfigReader.$( "listObjectsForIndex", [ "someobject" ] );
@@ -909,11 +918,17 @@ component extends="testbox.system.BaseSpec" {
 		mockContentRenderer            = getMockBox().createStub();
 		mockInterceptorService         = getMockBox().createStub();
 		mockPageDao                    = getMockBox().createStub();
+		mockSiteService                = getMockBox().createStub();
 		mockSiteTreeService            = getMockBox().createStub();
 		mockStatusDao                  = getMockBox().createStub();
 		mockSystemConfigurationService = getMockBox().createStub();
 
-		var engine = getMockBox().createMock( object=CreateObject( "elasticsearch.services.ElasticSearchEngine" ) );
+		mockColdbox                    = getMockBox().createStub();
+		mockRequestContext             = getMockBox().createStub();
+		mockSite                       = getMockBox().createStub();
+		mockSites                      = [ { id=CreateUUId(), name="test site" } ];
+
+		var engine      = getMockBox().createMock( object=CreateObject( "elasticsearch.services.ElasticSearchEngine" ) );
 
 		engine.$( "_checkIndexesExist" );
 		engine.$( "_announceInterception", {} );
@@ -923,10 +938,24 @@ component extends="testbox.system.BaseSpec" {
 		engine.$( "_getContentRendererService"    , mockContentRenderer            );
 		engine.$( "_getInterceptorService"        , mockInterceptorService         );
 		engine.$( "_getPageDao"                   , mockPageDao                    );
+		engine.$( "_getSiteService"               , mockSiteService                );
 		engine.$( "_getSiteTreeService"           , mockSiteTreeService            );
 		engine.$( "_getResultsFactory"            , mockResultsFactory             );
 		engine.$( "_getStatusDao"                 , mockStatusDao                  );
 		engine.$( "_getSystemConfigurationService", mockSystemConfigurationService );
+
+		engine.$( "$getColdbox"                   , mockColdbox                    );
+		mockColdbox.$( "getRequestContext"        , mockRequestContext             );
+		engine.$( "getSite"                       , mockSite                       );
+		engine.$( "setSite"                                                        );
+		engine.$( "listSites"                     , mockSites                      );
+
+		mockRequestContext.$( "getSite", mockSites[ 1 ] );
+		mockRequestContext.$( "setSite" );
+		mockSiteService.$( "listSites", mockSites );
+
+		engine.$( "clearReindexingQueue" );
+		engine.$( "processReindexingQueue" );
 
 		return engine.init(
 			  configurationReader        = mockConfigReader
@@ -935,6 +964,7 @@ component extends="testbox.system.BaseSpec" {
 			, contentRendererService     = mockContentRenderer
 			, interceptorService         = mockInterceptorService
 			, pageDao                    = mockPageDao
+			, siteService                = mockSiteService
 			, siteTreeService            = mockSiteTreeService
 			, resultsFactory             = mockResultsFactory
 			, statusDao                  = mockStatusDao

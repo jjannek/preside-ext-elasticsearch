@@ -1,6 +1,6 @@
 /**
  * @singleton
- *
+ * @presideservice
  */
 component {
 
@@ -12,12 +12,13 @@ component {
 	 * @contentRendererService.inject     provider:contentRendererService
 	 * @interceptorService.inject         coldbox:InterceptorService
 	 * @pageDao.inject                    presidecms:object:page
+	 * @siteService.inject                provider:siteService
 	 * @siteTreeService.inject            provider:siteTreeService
 	 * @resultsFactory.inject             provider:elasticSearchResultsFactory
 	 * @statusDao.inject                  presidecms:object:elasticsearch_indexing_status
 	 * @systemConfigurationService.inject provider:systemConfigurationService
 	 */
-	public any function init( required any apiWrapper, required any configurationReader, required any presideObjectService, required any contentRendererService, required any interceptorService, required any pageDao, required any siteTreeService, required any resultsFactory, required any statusDao, required any systemConfigurationService ) {
+	public any function init( required any apiWrapper, required any configurationReader, required any presideObjectService, required any contentRendererService, required any interceptorService, required any pageDao, required any siteService, required any siteTreeService, required any resultsFactory, required any statusDao, required any systemConfigurationService ) {
 		_setLocalCache( {} );
 		_setApiWrapper( arguments.apiWrapper );
 		_setConfigurationReader( arguments.configurationReader );
@@ -25,6 +26,7 @@ component {
 		_setContentRendererService( arguments.contentRendererService );
 		_setInterceptorService( arguments.interceptorService );
 		_setPageDao( arguments.pageDao );
+		_setSiteService( arguments.siteService );
 		_setSiteTreeService( arguments.siteTreeService );
 		_setResultsFactory( arguments.resultsFactory );
 		_setStatusDao( arguments.statusDao );
@@ -91,8 +93,9 @@ component {
 		for( var ix in indexes ){
 			if ( !apiWrapper.getAliasIndexes( ix ).len() ) {
 				var ux = createIndex( ix );
-				apiWrapper.addAlias( index=ux, alias=ix );
-				rebuildIndex( ix );
+
+				_createAlias( index=ux, alias=ix );
+				cleanupOldIndexes( keepIndex=ux, alias=ix );
 			}
 		}
 		return;
@@ -148,25 +151,46 @@ component {
 			);
 		}
 
-		try {
+		clearReindexingQueue( arguments.indexName );
 
+		try {
 			var uniqueIndexName = createIndex( arguments.indexName );
 			var objects         = _getConfigurationReader().listObjectsForIndex( arguments.indexName );
 			var indexingSuccess = true;
 
-			for( var objectName in objects ){
-				if ( canInfo ) { arguments.logger.info( "Starting to index [#objectName#] records" ); }
-				indexingSuccess = indexAllRecords( objectName, uniqueIndexName, indexName, arguments.logger ?: NullValue() );
-				if ( canInfo ) { arguments.logger.info( "Finished indexing [#objectName#] records" ); }
-				if ( !indexingSuccess ) {
-					if ( canWarn ) { arguments.logger.warn( "Indexing of [#objectName#] records returned unsuccessful, aborting index job." ); }
-					break;
+			var event           = $getColdbox().getRequestContext();
+			var originalSite    = event.getSite();
+			var sites           = _getSiteService().listSites();
+
+			for( var objectName in objects ) {
+				if( _isPageType( objectName ) || _objectIsUsingSiteTenancy( objectName ) ) {
+					for( var site in sites ) {
+						event.setSite( site );
+
+						if ( canInfo ) { arguments.logger.info( "> Site [#site.name#]" ); }
+
+						indexingSuccess = indexAllRecords( objectName, uniqueIndexName, indexName, arguments.logger ?: NullValue() );
+
+						if ( !indexingSuccess ) {
+							if ( canWarn ) { arguments.logger.warn( "Indexing of [#objectName#] records returned unsuccessful, aborting index job." ); }
+							break;
+						}
+					}
+					event.setSite( originalSite );
+				} else {
+					indexingSuccess = indexAllRecords( objectName, uniqueIndexName, indexName, arguments.logger ?: NullValue() );
+
+					if ( !indexingSuccess ) {
+						if ( canWarn ) { arguments.logger.warn( "Indexing of [#objectName#] records returned unsuccessful, aborting index job." ); }
+						break;
+					}
 				}
 			}
 
+			event.setSite( originalSite );
 
 			if ( indexingSuccess ) {
-				_getApiWrapper().addAlias( index=uniqueIndexName, alias=arguments.indexName );
+				_createAlias( index=uniqueIndexName, alias=arguments.indexName );
 
 				setIndexingStatus(
 					  indexName               = arguments.indexName
@@ -177,15 +201,16 @@ component {
 					, lastIndexingTimetaken   = GetTickCount() - start
 				);
 
-
 				cleanupOldIndexes( keepIndex=uniqueIndexName, alias=arguments.indexName );
+
+				processReindexingQueue( indexName=indexName, logger=arguments.logger ?: NullValue() );
 
 				_announceInterception( "postElasticSearchRebuildIndex", { alias = arguments.indexName, indexName = uniqueIndexName } );
 			} else {
 				if ( canError ) { arguments.logger.error( "An error occurred during indexing, aborting the job. Existing search indexes will be left untouched." ); }
 				terminateIndexing( arguments.indexName );
 				_announceInterception( "onElasticSearchRebuildIndexFailure", { alias = arguments.indexName, indexName = uniqueIndexName } );
-				_getApiWrapper().deleteIndex( uniqueIndexName );
+				_deleteIndex( uniqueIndexName );
 			}
 
 			return indexingSuccess;
@@ -194,7 +219,7 @@ component {
 			try {
 				terminateIndexing( arguments.indexName );
 				_announceInterception( "onElasticSearchRebuildIndexFailure", { alias = arguments.indexName, indexName = uniqueIndexName, error = e } );
-				_getApiWrapper().deleteIndex( uniqueIndexName );
+				_deleteIndex( uniqueIndexName );
 				if ( canError ) { arguments.logger.error( "An error occurred during indexing, aborting the job. Existing search indexes will be left untouched." ); }
 			} catch ( any e ) {}
 
@@ -211,7 +236,7 @@ component {
 
 		for( var indexName in indexes ){
 			if ( indexName != arguments.keepIndex ) {
-				_getApiWrapper().deleteIndex( indexName );
+				_deleteIndex( indexName );
 			}
 		}
 	}
@@ -296,6 +321,13 @@ component {
 
 			if ( IsBoolean( objectConfig.hasOwnDataGetter ?: "" ) && objectConfig.hasOwnDataGetter ) {
 				doc = object.getDataForSearchEngine( arguments.id );
+			} else if ( _hasSearchDataSource( arguments.objectName ) ) {
+				doc = $getColdbox().runEvent(
+					  event          = objectConfig.searchDataSource
+					, eventArguments = { id = arguments.id }
+					, private        = true
+					, prePostExempt  = true
+				);
 			} else {
 				doc = getObjectDataForIndexing( objName, arguments.id );
 			}
@@ -351,6 +383,7 @@ component {
 					, page       = ++page
 					, pageSize   = pageSize
 				);
+
 				var recordCount = records.len();
 
 				if ( canDebug ) { arguments.logger.debug( "Fetched #recordCount# #objectName# records ready for indexing." ); }
@@ -526,6 +559,14 @@ component {
 				  maxRows  = maxRows
 				, startRow = startRow
 			);
+
+		} else if ( _hasSearchDataSource( arguments.objectName ) ){
+			return $getColdbox().runEvent(
+				  event          = objConfig.searchDataSource
+				, eventArguments = { maxRows  = maxRows, startRow = startRow }
+				, private        = true
+				, prePostExempt  = true
+			);
 		}
 
 		return getObjectDataForIndexing(
@@ -538,13 +579,14 @@ component {
 	public void function processPageTypeRecordsBeforeIndexing( required string objectName, required array records ) {
 		if ( _isPageType( arguments.objectName ) ) {
 			for( var i=arguments.records.len(); i > 0; i-- ){
-				if ( !_isPageRecordValidForSearch( arguments.records[i] ) ) {
+				var hierarchicalPageData = _getHierarchalPageData( arguments.records[i] );
+
+				if ( !hierarchicalPageData.validForSearch ) {
 					arguments.records.deleteAt( i );
 					continue;
 				}
 
-				var restrictionRules = _getSiteTreeService().getAccessRestrictionRulesForPage( arguments.records[i].id );
-				arguments.records[i].access_restricted = restrictionRules.access_restriction != "none";
+				arguments.records[i].access_restricted = hierarchicalPageData.accessRestricted;
 			}
 		}
 	}
@@ -675,6 +717,65 @@ component {
 		return ListToArray( synonyms, Chr(10) & Chr(13) );
 	}
 
+	public void function queueRecordReindexIfNecessary(
+		  required string  objectName
+		, required string  recordId
+		,          boolean isDeleted = false
+	) {
+		if ( _getConfigurationReader().isObjectSearchEnabled( arguments.objectName ) ) {
+			var objConfig = _getConfigurationReader().getObjectConfiguration( arguments.objectName );
+
+			if ( Len( Trim( objConfig.indexName ?: "" ) ) && isIndexReindexing( objConfig.indexName ) ) {
+				$getPresideObject( "elasticsearch_index_queue" ).insertData( {
+					  index_name  = objConfig.indexName
+					, object_name = arguments.objectName
+					, record_id   = arguments.recordId
+					, is_deleted  = arguments.isDeleted
+				} );
+			}
+		}
+	}
+
+	public void function clearReindexingQueue( required string indexName ) {
+		$getPresideObject( "elasticsearch_index_queue" ).deleteData( filter={ index_name = arguments.indexName } );
+	}
+
+	public query function getQueuedRecordsForReindexing( required string indexName ) {
+		return $getPresideObject( "elasticsearch_index_queue" ).selectData(
+			  filter       = { index_name = arguments.indexName }
+			, selectFields = [ "id", "object_name", "record_id", "is_deleted" ]
+		);
+	}
+
+	public void function processReindexingQueue( required string indexName, any logger ) {
+		var queue    = getQueuedRecordsForReindexing( arguments.indexName );
+		var queueDao = $getPresideObject( "elasticsearch_index_queue" );
+
+		if ( queue.recordCount ) {
+			var canLog  = StructKeyExists( arguments, "logger" );
+			var canInfo = canLog && arguments.logger.canInfo();
+
+			if ( canInfo ) {
+				arguments.logger.info( "Processing post-reindex record queue. [#NumberFormat( queue.recordCount )#] records to re-index that were modified during the indexing process" );
+			}
+
+			for( var record in queue ) {
+				if ( record.is_deleted ) {
+					deleteRecord( record.object_name, record.record_id );
+
+				} else {
+					indexRecord( record.object_name, record.record_id );
+				}
+
+				queueDao.deleteData( record.id );
+			}
+
+			if ( canInfo ) {
+				arguments.logger.info( "Finished processing [#NumberFormat( queue.recordCount )#] post-reindex queued records." );
+			}
+		}
+	}
+
 // PRIVATE HELPERS
 	/**
 	 * odd proxy to ensureIndexesExist() - this simply helps us to
@@ -726,32 +827,37 @@ component {
 		return settings;
 	}
 
-	private boolean function _isPageRecordValidForSearch( required struct pagerecord ) {
-		var cache      = request._isPageRecordValidForSearchCache = request._isPageRecordValidForSearchCache ?: {};
-		var pageId     = arguments.pageRecord.id ?: "";
-		var pageFields = [ "_hierarchy_id", "_hierarchy_lineage", "active", "internal_search_access", "embargo_date", "expiry_date" ];
-		var page       = _getPageDao().selectData( id=pageId, selectFields=pageFields );
+	private struct function _getHierarchalPageData( required struct pagerecord ) {
+		var cache            = request._getHierarchalPageDataCache = request._getHierarchalPageDataCache ?: {};
+		var pageId           = arguments.pageRecord.id ?: "";
+		var pageFields       = [ "_hierarchy_id", "_hierarchy_lineage", "active", "internal_search_access", "embargo_date", "expiry_date", "access_restriction" ];
+		var page             = _getPageDao().selectData( id=pageId, selectFields=pageFields, useCache=false );
+		var accessRestricted = "";
 		var isActive   = function( required boolean active, required string embargo_date, required string expiry_date ) {
 			return arguments.active && ( !IsDate( arguments.embargo_date ) || Now() >= arguments.embargo_date ) && ( !IsDate( arguments.expiry_date ) || Now() <= arguments.expiry_date );
 		};
 
 		if ( !page.recordCount ) {
-			return false;
+			return { validForSearch=false };
 		}
 
 		for( var p in page ) { cache[ p._hierarchy_id ] = p; }
 
 
 		if ( !isActive( page.active, page.embargo_date, page.expiry_date ) || page.internal_search_access == "block" ) {
-			return false;
+			return { validForSearch=false };
 		}
 
 		var internalSearchAccess = page.internal_search_access;
 		var lineage              = ListToArray( page._hierarchy_lineage, "/" );
 
+		if ( page.access_restriction != "inherit" ) {
+			accessRestricted = page.access_restriction != "none";
+		}
+
 		for( var i=lineage.len(); i>0; i-- ){
 			if ( !cache.keyExists( lineage[i] ) ){
-				var parentPage = _getPageDao().selectData( filter={ _hierarchy_id=lineage[i] }, selectFields=pageFields );
+				var parentPage = _getPageDao().selectData( filter={ _hierarchy_id=lineage[i] }, selectFields=pageFields, useCache=false );
 				for( var p in parentPage ) { cache[ p._hierarchy_id ] = p; }
 			}
 			cache[ lineage[ i ] ] = cache[ lineage[ i ] ] ?: {};
@@ -760,18 +866,24 @@ component {
 				var parentPage = cache[ lineage[ i ] ];
 
 				if ( !isActive( parentPage.active, parentPage.embargo_date, parentPage.expiry_date ) ) {
-					return false;
+					return { validForSearch=false };
 				}
 
 				if ( internalSearchAccess != "allow" && parentPage.internal_search_access == "block" ) {
-					return false;
+					return { validForSearch=false };
+				}
+
+				if ( !IsBoolean( accessRestricted ) ) {
+					if ( parentPage.access_restriction != "inherit" ) {
+						accessRestricted = parentPage.access_restriction != "none";
+					}
 				}
 
 				internalSearchAccess = parentPage.internal_search_access;
 			}
 		}
 
-		return true;
+		return { validForSearch=true, accessRestricted=( IsBoolean( accessRestricted ) && accessRestricted ) };
 	}
 
 	private any function _simpleLocalCache( required string cacheKey, required any generator ) {
@@ -887,6 +999,46 @@ component {
 		};
 	}
 
+	private boolean function _objectIsUsingSiteTenancy( required string objectName ) {
+		if ( !_getPresideObjectService().objectExists( arguments.objectName ) ) {
+			return false;
+		}
+
+		var usingSiteTenancy = _getPresideObjectService().getObjectAttribute( arguments.objectName, "siteFiltered", false );
+
+		return IsBoolean( usingSiteTenancy ) && usingSiteTenancy;
+	}
+
+	private boolean function _hasSearchDataSource( required string objectName ){
+		var objConfig = _getConfigurationReader().getObjectConfiguration( arguments.objectName );
+
+		if ( len( objConfig.searchDataSource ?: "" ) ) {
+			if ( !$getColdbox().handlerExists( objConfig.searchDataSource ) ){
+				throw( type="ElasticSearchEngine.indexing.searchDataSource.notFound", message="Defined searchDataSource method '#objConfig.searchDataSource#' for object '#arguments.objectName#' was not found." );
+			}
+			return true;
+		}
+		return false;
+	}
+
+	private void function _deleteIndex( required string indexName ) {
+		try {
+			_getApiWrapper().deleteIndex( arguments.indexName );
+		} catch( "cfelasticsearch.IndexMissingException" e ) {
+			// ignore missing index exceptions - consider deleted
+		}
+	}
+
+	private void function _createAlias( required string index, required string alias ) {
+		try {
+			_getApiWrapper().addAlias( argumentCollection=arguments  );
+		} catch( "cfelasticsearch.InvalidAliasNameException" e ) {
+			_deleteIndex( arguments.alias );
+			sleep( 5000 ); // avoid delayed delete subsequently deleting our alias!
+			_getApiWrapper().addAlias( argumentCollection=arguments );
+		}
+	}
+
 // GETTERS AND SETTERS
 	private any function _getApiWrapper() {
 		return _apiWrapper.get();
@@ -935,6 +1087,13 @@ component {
 	}
 	private void function _setPageDao( required any pageDao ) {
 		_pageDao = arguments.pageDao;
+	}
+
+	private any function _getSiteService() {
+		return _siteService.get();
+	}
+	private void function _setSiteService( required any siteService ) {
+		_siteService = arguments.siteService;
 	}
 
 	private any function _getSiteTreeService() {

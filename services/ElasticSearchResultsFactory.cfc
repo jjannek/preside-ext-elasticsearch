@@ -32,6 +32,9 @@ component output=false singleton=true {
 			if ( StructKeyExists( arguments.rawResult, 'aggregations' ) ) {
 				args.aggregations = arguments.rawResult.aggregations;
 			}
+			if ( StructKeyExists( arguments.rawResult, 'suggest' ) ) {
+				args.suggestions = arguments.rawResult.suggest;
+			}
 		}
 
 		return new ElasticSearchResult( argumentCollection = args );
