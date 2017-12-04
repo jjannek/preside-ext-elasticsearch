@@ -1,9 +1,9 @@
 component extends="coldbox.system.Interceptor" {
 
 	property name="elasticSearchEngine"        inject="provider:elasticSearchEngine";
-	property name="elasticSearchConfig"        inject="provider:elasticSearchPresideObjectConfigurationReader";
-	property name="systemConfigurationService" inject="provider:SystemConfigurationService";
-	property name="presideObjectService"       inject="provider:PresideObjectService";
+	property name="systemConfigurationService" inject="delayedInjector:systemConfigurationService";
+	property name="presideObjectService"       inject="delayedInjector:presideObjectService";
+	property name="adhocTaskmanagerService"    inject="delayedInjector:adhocTaskmanagerService";
 
 // PUBLIC
 	public void function configure() {}
@@ -32,13 +32,13 @@ component extends="coldbox.system.Interceptor" {
 		var id = Len( Trim( interceptData.newId ?: "" ) ) ? interceptData.newId : ( interceptData.data.id ?: "" );
 
 		if ( Len( Trim( id ) ) ) {
-			_getSearchEngine().indexRecord(
-				  objectName = objectName
-				, id         = id
-			);
-			_getSearchEngine().queueRecordReindexIfNecessary(
-				  objectName = objectName
-				, recordId   = id
+			adhocTaskmanagerService.createTask(
+				  event  = "admin.elasticSearchControl.indexRecord"
+				, args   = {
+					  objectName = objectName
+					, id         = id
+				}
+				, runNow = true
 			);
 		}
 	}
@@ -47,14 +47,10 @@ component extends="coldbox.system.Interceptor" {
 		var id = interceptData.id ?: "";
 
 		if ( Len( Trim( id ) ) ) {
-			_getSearchEngine().indexRecord(
-				  objectName = interceptData.page_type ?: ""
-				, id         = id
-			);
-
-			_getSearchEngine().queueRecordReindexIfNecessary(
-				  objectName = interceptData.page_type ?: ""
-				, recordId   = id
+			adhocTaskmanagerService.createTask(
+				  event  = "admin.elasticSearchControl.indexRecord"
+				, args   = { objectName=interceptData.page_type ?: "", id=id }
+				, runNow = true
 			);
 		}
 	}
@@ -68,30 +64,17 @@ component extends="coldbox.system.Interceptor" {
 		var id = Len( Trim( interceptData.id ?: "" ) ) ? interceptData.id : ( interceptData.data.id ?: "" );
 
 		if ( Len( Trim( objectName ) ) && Len( Trim( id ) ) ) {
-			_getSearchEngine().indexRecord(
-				  objectName = objectName
-				, id         = id
-			);
-			_getSearchEngine().queueRecordReindexIfNecessary(
-				  objectName = objectName
-				, recordId   = id
-			);
-			var reindexChildPage = systemConfigurationService.getSetting( "elasticsearch", "reindex_child_pages_on_edit", true )
-			if( isBoolean( reindexChildPage ?: "" ) && reindexChildPage ){
-				if ( _inThread() ) {
-					_getSearchEngine().reindexChildPages( objectName, id, interceptData.data ?: {} );
-				} else {
-					thread name         = CreateUUId()
-					       searchEngine = _getSearchEngine()
-					       objectName   = objectName
-					       id           = id
-					       data         = ( interceptData.data ?: {} )
-					{
-						setting requesttimeout=300;
-						attributes.searchEngine.reindexChildPages( attributes.objectName, attributes.id, attributes.data );
-					}
+			var reindexChildPages = systemConfigurationService.getSetting( "elasticsearch", "reindex_child_pages_on_edit", true )
+			adhocTaskmanagerService.createTask(
+				  event  = "admin.elasticSearchControl.indexRecord"
+				, args   = {
+					  objectName        = objectName
+					, id                = id
+					, reindexChildPages = reindexChildPages
+					, data              = interceptData.data ?: {}
 				}
-			}
+				, runNow = true
+			);
 		}
 	}
 
@@ -110,30 +93,19 @@ component extends="coldbox.system.Interceptor" {
 		}
 
 		if ( IsSimpleValue( id ) && Len( Trim( id ) ) ) {
-			_getSearchEngine().deleteRecord(
-				  objectName = objectName
-				, id         = id
-			);
-			_getSearchEngine().queueRecordReindexIfNecessary(
-				  objectName = objectName
-				, recordId   = id
-				, isDeleted  = true
+			adhocTaskmanagerService.createTask(
+				  event  = "admin.elasticSearchControl.deleteRecord"
+				, args   = {
+					  objectName = objectName
+					, id         = id
+				}
+				, runNow = true
 			);
 		}
 	}
 
-
 // PRIVATE
-	private boolean function _isSearchEnabled( required string objectName ) {
-		return Len( Trim( arguments.objectName ) ) && _getElasticSearchConfig().isObjectSearchEnabled( arguments.objectName );
-	}
 	private any function _getSearchEngine() {
 		return elasticSearchEngine.get();
-	}
-	private any function _getElasticSearchConfig() {
-		return elasticSearchConfig.get();
-	}
-	private boolean function _inThread() {
-		return getPageContext().hasFamily();
 	}
 }

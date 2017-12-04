@@ -82,6 +82,45 @@ component output="false" extends="preside.system.base.AdminHandler" {
 		setNextEvent( url=event.buildAdminLink( linkTo="elasticSearchControl" ) );
 	}
 
+	public void function indexRecord( event, rc, prc, args={} ) {
+
+		var objectName = args.objectName ?: "";
+		var id         = args.id         ?: "";
+
+		if ( len( objectName ) && len( id ) ) {
+			elasticSearchEngine.indexRecord(
+				  objectName = objectName
+				, id         = id
+			);
+			elasticSearchEngine.queueRecordReindexIfNecessary(
+				  objectName = objectName
+				, recordId   = id
+			);
+
+			if ( isBoolean( args.reindexChildPages ?: "" ) && args.reindexChildPages ) {
+				setting requesttimeout=300;
+				elasticSearchEngine.reindexChildPages( objectName, id, args.data ?: {} );
+			}
+		}
+	}
+
+	public void function deleteRecord( event, rc, prc, args={} ) {
+
+		var objectName = args.objectName ?: "";
+		var id         = args.id         ?: "";
+
+		if ( len( objectName ) && len( id ) ) {
+			elasticSearchEngine.deleteRecord(
+				  objectName = objectName
+				, id         = id
+			);
+			elasticSearchEngine.queueRecordReindexIfNecessary(
+				  objectName = objectName
+				, recordId   = id
+				, isDeleted  = true
+			);
+		}
+	}
 
 // PRIVATE HELPERS
 	private void function _checkPermissions( required any event, required string key ) output=false {
